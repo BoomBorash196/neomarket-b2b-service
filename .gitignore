@@ -1,0 +1,11 @@
+src/
+tests/
+migrations/
+*.log
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+dist/
+build/
