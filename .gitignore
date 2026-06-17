@@ -1,6 +1,3 @@
-src/
-tests/
-migrations/
 *.log
 .env
 __pycache__/
