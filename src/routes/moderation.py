@@ -89,24 +89,14 @@ async def receive_moderation_event(
             )
 
         elif event.event_type == "BLOCKED":
-            # Validate product exists and is ON_MODERATION
-            product = await db.get(Product, event.product_id)
-            if not product or product.deleted:
-                raise ProductNotFoundError(event.product_id)
-            if product.status != ProductStatus.ON_MODERATION:
-                raise ProductWrongStatusError(event.product_id, product.status.value)
-
-            # Set status to BLOCKED or HARD_BLOCKED
-            if event.hard_block:
-                product.status = ProductStatus.MODERATED  # no HARD_BLOCKED in current enum, use MODERATED as placeholder
-                # In a real system we'd add HARD_BLOCKED to ProductStatus
-            else:
-                product.status = ProductStatus.BLOCKED
-
-            if event.moderator_comment:
-                product.blocking_comment = event.moderator_comment
-
-            await db.flush()
+            product = await service.process_blocked_event(
+                db=db,
+                product_id=event.product_id,
+                idempotency_key=event.idempotency_key,
+                hard_block=event.hard_block,
+                blocking_reason=event.blocking_reason,
+                moderator_comment=event.moderator_comment,
+            )
             return ModerationEventResponse(
                 product_id=event.product_id,
                 event_type=event.event_type,

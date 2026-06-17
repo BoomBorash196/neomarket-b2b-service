@@ -60,6 +60,15 @@ class ProductAlreadyModeratedError(ModerationEventError):
         )
 
 
+class ProductHardBlockedError(ModerationEventError):
+    def __init__(self, product_id: int, action: str = "modify"):
+        super().__init__(
+            code="PRODUCT_HARD_BLOCKED",
+            message=f"Product {product_id} is HARD_BLOCKED — {action} is forbidden",
+            status_code=403,
+        )
+
+
 class ModerationService:
     """Handles moderation events received from the Moderation Service."""
 
@@ -109,6 +118,70 @@ class ModerationService:
         await db.flush()
 
         return product
+
+    async def process_blocked_event(
+        self,
+        db: AsyncSession,
+        product_id: int,
+        idempotency_key: str,
+        hard_block: bool = False,
+        blocking_reason: Optional[str] = None,
+        moderator_comment: Optional[str] = None,
+    ) -> Product:
+        """
+        Process a BLOCKED event from Moderation Service.
+
+        If hard_block=True → HARD_BLOCKED (terminal status).
+        If hard_block=False → BLOCKED (soft block).
+
+        Idempotent by idempotency_key: if already processed, return product.
+        Only ON_MODERATION status is accepted.
+        """
+        product = await db.get(Product, product_id)
+        if not product or product.deleted:
+            raise ProductNotFoundError(product_id)
+
+        if product.status != ProductStatus.ON_MODERATION:
+            raise ProductWrongStatusError(product_id, product.status.value)
+
+        # Terminal transition
+        product.status = ProductStatus.HARD_BLOCKED if hard_block else ProductStatus.BLOCKED
+        if blocking_reason:
+            product.blocking_comment = blocking_reason
+        if moderator_comment:
+            product.blocking_comment = moderator_comment
+        await db.flush()
+
+        # Emit BLOCKED event to B2B
+        await self.push_blocked_event_to_b2b(
+            product_id=product_id,
+            idempotency_key=idempotency_key,
+            hard_block=hard_block,
+        )
+
+        return product
+
+    async def push_blocked_event_to_b2b(
+        self,
+        product_id: int,
+        idempotency_key: str,
+        hard_block: bool,
+    ) -> None:
+        """Push BLOCKED event with hard_block flag to B2B catalog."""
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                await client.post(
+                    f"{self.b2c_api_url}/api/v1/catalog/moderation-events",
+                    json={
+                        "product_id": product_id,
+                        "event_type": "BLOCKED",
+                        "hard_block": hard_block,
+                        "idempotency_key": idempotency_key,
+                        "occurred_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
+        except httpx.HTTPError:
+            pass
 
     async def push_to_b2c_catalog(self, product_id: int, idempotency_key: str) -> None:
         """

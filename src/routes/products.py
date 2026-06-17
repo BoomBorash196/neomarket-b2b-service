@@ -11,6 +11,18 @@ from src.schemas.product import ProductCreate, ProductResponse, ProductUpdate, P
 router = APIRouter()
 
 
+def _check_hard_blocked(product: Product) -> None:
+    """Raise 403 if product is HARD_BLOCKED."""
+    if product.status == ProductStatus.HARD_BLOCKED:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "PRODUCT_HARD_BLOCKED",
+                "message": "Product is HARD_BLOCKED — modification is forbidden",
+            },
+        )
+
+
 @router.post("/products", response_model=ProductResponse, status_code=201)
 async def create_product(
     product: ProductCreate,
@@ -159,6 +171,8 @@ async def update_product(
     if not db_product or db_product.deleted:
         raise HTTPException(status_code=404, detail="Product not found")
 
+    _check_hard_blocked(db_product)
+
     update_data = product_update.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(db_product, field, value)
@@ -177,6 +191,8 @@ async def submit_for_moderation(product_id: int, db: AsyncSession = Depends(get_
     db_product = await db.get(Product, product_id)
     if not db_product or db_product.deleted:
         raise HTTPException(status_code=404, detail="Product not found")
+
+    _check_hard_blocked(db_product)
 
     if db_product.status != ProductStatus.CREATED:
         raise HTTPException(
@@ -205,6 +221,8 @@ async def delete_product(product_id: int, db: AsyncSession = Depends(get_db)):
     db_product = await db.get(Product, product_id)
     if not db_product or db_product.deleted:
         raise HTTPException(status_code=404, detail="Product not found")
+
+    _check_hard_blocked(db_product)
 
     db_product.deleted = True
     await db.commit()

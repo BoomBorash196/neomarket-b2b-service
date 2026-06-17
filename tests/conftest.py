@@ -10,8 +10,6 @@ from fastapi.testclient import TestClient
 from src.main import app
 from src.models.base import get_db as real_get_db
 from src.models.product import ProductStatus
-
-# Import Product for identity check in mock_get
 from src.models.product import Product
 
 
@@ -76,6 +74,5 @@ def make_test_client(product, skus):
     async def override_get_db():
         yield session
 
-    # Key must be the actual function object, not a string
     app.dependency_overrides[real_get_db] = override_get_db
     return TestClient(app)

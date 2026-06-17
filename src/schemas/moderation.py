@@ -19,6 +19,7 @@ class ModerationEventRequest(BaseModel):
     moderator_id: Optional[str] = None
     moderator_comment: Optional[str] = None
     blocking_reason_id: Optional[str] = None
+    blocking_reason: Optional[str] = None
     hard_block: bool = False
     field_reports: Optional[list] = None
     occurred_at: Optional[datetime] = None
