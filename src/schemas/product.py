@@ -67,14 +67,20 @@ class SKUResponse(SKUBase):
 
 
 class ProductBase(BaseModel):
+    seller_id: int
     title: str = Field(..., min_length=1, max_length=500)
     description: Optional[str] = None
-    category_id: int
-    seller_id: int
+    category_id: int = Field(..., description="Category ID is required")
+
+    class Config:
+        from_attributes = True
 
 
-class ProductCreate(ProductBase):
-    images: List[ProductImageCreate] = []
+class ProductCreate(BaseModel):
+    title: str = Field(..., min_length=1, max_length=500)
+    description: Optional[str] = None
+    category_id: int = Field(..., description="Category ID is required")
+    images: List[ProductImageCreate] = Field(default_factory=list, min_length=1, description="At least one image is required")
     characteristics: List[ProductCharacteristicCreate] = []
     skus: List[SKUCreate] = []
 

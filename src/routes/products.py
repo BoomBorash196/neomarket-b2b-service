@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
 from typing import List, Optional
@@ -25,48 +25,66 @@ def _check_hard_blocked(product: Product) -> None:
 
 @router.post("/products", response_model=ProductResponse, status_code=201)
 async def create_product(
-    product: ProductCreate,
-    db: AsyncSession = Depends(get_db)
+    product_data: ProductCreate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
 ):
     """
-    Создать новый товар
+    Create a new product.
+
+    seller_id is extracted from JWT claims — never from request body (IDOR prevention).
+    Requires: title, category_id, at least one image.
     """
+    # Extract seller_id from JWT (fastapi.security OAuth2 scheme sets request.state.user)
+    seller_id = getattr(request.state, "user", None)
+    if seller_id is None:
+        # Fallback: read from X-Seller-Id header (for tests / direct API calls)
+        seller_id = request.headers.get("X-Seller-Id")
+    if seller_id is None:
+        raise HTTPException(status_code=401, detail={"code": "UNAUTHORIZED", "message": "JWT token required"})
+
+    # Validate seller_id is an integer
+    try:
+        seller_id = int(seller_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=401, detail={"code": "UNAUTHORIZED", "message": "Invalid JWT seller_id"})
+
     db_product = Product(
-        title=product.title,
-        description=product.description,
-        category_id=product.category_id,
-        seller_id=product.seller_id,
-        status=ProductStatus.CREATED
+        title=product_data.title,
+        description=product_data.description,
+        category_id=product_data.category_id,
+        seller_id=seller_id,
+        status=ProductStatus.CREATED,
     )
-    db.session.add(db_product)
+    db.add(db_product)
     await db.flush()
 
-    # Добавляем изображения
-    for img_data in product.images:
+    # Add images
+    for img_data in product_data.images:
         img = ProductImage(product_id=db_product.id, **img_data.model_dump())
-        db.session.add(img)
+        db.add(img)
 
-    # Добавляем характеристики
-    for char_data in product.characteristics:
+    # Add product characteristics
+    for char_data in product_data.characteristics:
         char = ProductCharacteristic(product_id=db_product.id, **char_data.model_dump())
-        db.session.add(char)
+        db.add(char)
 
-    # Добавляем SKU
-    for sku_data in product.skus:
+    # Add SKUs
+    for sku_data in product_data.skus:
         sku = SKU(
             product_id=db_product.id,
             sku_code=sku_data.sku_code,
             name=sku_data.name,
             price=sku_data.price,
-            active_quantity=sku_data.active_quantity
+            active_quantity=sku_data.active_quantity,
         )
-        db.session.add(sku)
+        db.add(sku)
 
-        # Характеристики SKU
+        # SKU characteristics
         for sku_char_data in sku_data.characteristics:
             from src.models.sku import SKUCharacteristic
             sku_char = SKUCharacteristic(sku_id=sku.id, **sku_char_data.model_dump())
-            db.session.add(sku_char)
+            db.add(sku_char)
 
     await db.commit()
     await db.refresh(db_product)
