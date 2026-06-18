@@ -96,6 +96,7 @@ async def receive_moderation_event(
                 hard_block=event.hard_block,
                 blocking_reason=event.blocking_reason,
                 moderator_comment=event.moderator_comment,
+                field_reports=event.field_reports,
             )
             return ModerationEventResponse(
                 product_id=event.product_id,

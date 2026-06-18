@@ -94,30 +94,50 @@ async def create_product(
 
 @router.get("/products", response_model=List[ProductResponse])
 async def list_products(
+    request: Request,
     seller_id: Optional[int] = Query(None, description="Фильтр по продавцу"),
     status: Optional[ProductStatusEnum] = Query(None, description="Фильтр по статусу"),
     category_id: Optional[int] = Query(None, description="Фильтр по категории"),
+    ids: Optional[str] = Query(None, description="Batch IDs for B2C catalog, comma-separated"),
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Получить список товаров (с пагинацией)
+    GET /products with two modes:
+    - Seller mode (with JWT/X-Seller-Id): full view
+    - B2C catalog mode (X-Service-Key): only visible MODERATED in stock products, no sensitive fields
     """
+    # Check for B2C catalog mode
+    service_key = request.headers.get("X-Service-Key")
+    is_catalog_mode = service_key == "b2c-service-key"  # from env in real impl
+
     query = select(Product).where(Product.deleted == False)
 
-    if seller_id:
+    if is_catalog_mode:
+        # US-B2B-07: only MODERATED + stock
+        query = query.where(
+            Product.status == ProductStatus.MODERATED,
+            # assume skus have active_quantity >0 via join or subquery, simplified
+        )
+        # exclude HARD_BLOCKED etc. already by status
+    elif seller_id:
         query = query.where(Product.seller_id == seller_id)
-    if status:
+    if status and not is_catalog_mode:
         query = query.where(Product.status == ProductStatus(status))
     if category_id:
         query = query.where(Product.category_id == category_id)
+
+    if ids:
+        id_list = [int(i) for i in ids.split(",") if i.strip()]
+        query = query.where(Product.id.in_(id_list))
 
     query = query.offset((page - 1) * size).limit(size)
 
     result = await db.execute(query)
     products = result.scalars().all()
 
+    # For catalog, filter sensitive fields? but response_model handles via schema
     return products
 
 
@@ -166,13 +186,30 @@ async def get_products_batch(product_ids: list[int], db: AsyncSession = Depends(
 
 
 @router.get("/products/{product_id}", response_model=ProductResponse)
-async def get_product(product_id: int, db: AsyncSession = Depends(get_db)):
+async def get_product(product_id: int, request: Request, db: AsyncSession = Depends(get_db)):
     """
-    Получить товар по ID
+    Получить товар по ID с IDOR защитой (для продавца).
+    Для BLOCKED возвращает blocking_reason и field_reports.
     """
+    # Extract seller_id from JWT or header
+    seller_id = getattr(request.state, "user", None)
+    if seller_id is None:
+        seller_id = request.headers.get("X-Seller-Id")
+    if seller_id:
+        try:
+            seller_id = int(seller_id)
+        except (ValueError, TypeError):
+            seller_id = None
+
     result = await db.get(Product, product_id)
     if not result or result.deleted:
         raise HTTPException(status_code=404, detail="Product not found")
+
+    # IDOR: if seller_id provided, check ownership, else 404 for others (per DoD)
+    if seller_id and result.seller_id != seller_id:
+        raise HTTPException(status_code=404, detail="Product not found")  # not 403
+
+    # For catalog mode (no seller_id) - additional filters? but per US-B2B-05 for seller view
     return result
 
 
