@@ -101,8 +101,6 @@ class ProductResponse(ProductBase):
     updated_at: Optional[datetime] = None
     deleted: bool = False
     blocking_comment: Optional[str] = None
-    blocking_reason: Optional[dict] = None  # for blocked status
-    field_reports: Optional[list] = None
 
     class Config:
         from_attributes = True

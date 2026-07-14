@@ -113,10 +113,8 @@ class ModerationService:
 
         # Transition to MODERATED
         product.status = ProductStatus.MODERATED
-        # Clear blocking data on successful moderation
-        product.blocking_reason_id = None
-        product.blocking_comment = moderator_comment or None
-        product.field_reports = None
+        if moderator_comment:
+            product.blocking_comment = moderator_comment  # reuse for moderation comment
         await db.flush()
 
         return product
@@ -129,7 +127,6 @@ class ModerationService:
         hard_block: bool = False,
         blocking_reason: Optional[str] = None,
         moderator_comment: Optional[str] = None,
-        field_reports: Optional[list] = None,
     ) -> Product:
         """
         Process a BLOCKED event from Moderation Service.
@@ -153,8 +150,6 @@ class ModerationService:
             product.blocking_comment = blocking_reason
         if moderator_comment:
             product.blocking_comment = moderator_comment
-        if field_reports:
-            product.field_reports = field_reports
         await db.flush()
 
         # Emit BLOCKED event to B2B

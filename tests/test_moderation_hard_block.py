@@ -41,6 +41,7 @@ async def test_hard_block_transitions_to_terminal_and_emits_event():
                     "idempotency_key": "hb-001",
                     "moderator_comment": "Counterfeit goods",
                 },
+                headers={"X-Service-Token": "neomarket-b2b-secret"},
             )
 
     assert response.status_code == 200, f"Expected 200, got {response.status_code}: {response.text}"
@@ -83,6 +84,7 @@ async def test_hard_block_event_carries_hard_block_true():
                     "hard_block": True,
                     "idempotency_key": "hb-002",
                 },
+                headers={"X-Service-Token": "neomarket-b2b-secret"},
             )
 
     assert captured_payload.get("event_type") == "BLOCKED"
@@ -135,6 +137,7 @@ async def test_edited_event_on_hard_blocked_is_ignored():
                 "event_type": "MODERATED",
                 "idempotency_key": "ed-001",
             },
+            headers={"X-Service-Token": "neomarket-b2b-secret"},
         )
 
     assert response.status_code == 409, f"Expected 409, got {response.status_code}: {response.text}"

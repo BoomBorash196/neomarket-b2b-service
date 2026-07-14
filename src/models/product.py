@@ -1,5 +1,4 @@
 from sqlalchemy import Column, Integer, String, Enum, Text, Boolean, DateTime, ForeignKey, Enum as SQLEnum
-from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from src.models.base import Base
@@ -35,7 +34,6 @@ class Product(Base):
 
     blocking_reason_id = Column(Integer, ForeignKey("product_blocking_reasons.id"), nullable=True)
     blocking_comment = Column(Text, nullable=True)
-    field_reports = Column(postgresql.JSONB, nullable=True)  # Array of field reports from moderation
 
     def __repr__(self):
         return f"<Product(id={self.id}, title='{self.title}', status={self.status.value})>"

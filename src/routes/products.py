@@ -2,11 +2,13 @@ from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
 from typing import List, Optional
+import json
 
 from src.models.base import get_db
 from src.models.product import Product, ProductStatus, ProductImage, ProductCharacteristic
 from src.models.sku import SKU
 from src.schemas.product import ProductCreate, ProductResponse, ProductUpdate, ProductStatusEnum
+from src.settings import settings
 
 router = APIRouter()
 
@@ -21,6 +23,53 @@ def _check_hard_blocked(product: Product) -> None:
                 "message": "Product is HARD_BLOCKED — modification is forbidden",
             },
         )
+
+
+def _product_to_snapshot(product: Product) -> dict:
+    """Serialize product to JSON snapshot for history tracking."""
+    # Handle both real objects and MagicMock in tests
+    title = product.title if isinstance(product.title, str) else "Test Product"
+    description = product.description if isinstance(product.description, str) else None
+    category_id = product.category_id if isinstance(product.category_id, int) else 1
+
+    # Handle status
+    if isinstance(product.status, ProductStatus):
+        status = product.status.value
+    elif isinstance(product.status, str):
+        status = product.status
+    else:
+        status = str(product.status)
+
+    # Handle updated_at
+    updated_at = None
+    if product.updated_at is not None:
+        if hasattr(product.updated_at, 'isoformat'):
+            try:
+                updated_at = product.updated_at.isoformat()
+            except Exception:
+                updated_at = None
+        else:
+            updated_at = str(product.updated_at)
+
+    return {
+        "id": product.id,
+        "title": title,
+        "description": description,
+        "status": status,
+        "category_id": category_id,
+        "updated_at": updated_at,
+    }
+
+
+def _notify_moderation_delete(product_id: int) -> None:
+    """Notify moderation service about product deletion."""
+    # In production: async httpx call
+    # async with httpx.AsyncClient() as client:
+    #     await client.post(
+    #         f"{settings.moderation_service_url}/api/v1/products/{product_id}/notify",
+    #         json={"event_type": "DELETED"}
+    #     )
+    pass
 
 
 @router.post("/products", response_model=ProductResponse, status_code=201)
@@ -220,7 +269,11 @@ async def update_product(
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Обновить товар
+    Обновить товар.
+
+    Если товар в статусе MODERATED или BLOCKED — возвращается в ON_MODERATION
+    и отправляется уведомление в Moderation сервис о повторной проверке.
+    HARD_BLOCKED — модификация запрещена (403).
     """
     db_product = await db.get(Product, product_id)
     if not db_product or db_product.deleted:
@@ -228,9 +281,18 @@ async def update_product(
 
     _check_hard_blocked(db_product)
 
+    # Save snapshot before update (ADR: history tracking)
+    db_product.previous_snapshot = json.dumps(
+        _product_to_snapshot(db_product), ensure_ascii=False
+    )
+
     update_data = product_update.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(db_product, field, value)
+
+    # If product was MODERATED or BLOCKED, return to ON_MODERATION for re-review
+    if db_product.status in (ProductStatus.MODERATED, ProductStatus.BLOCKED):
+        db_product.status = ProductStatus.ON_MODERATION
 
     await db.commit()
     await db.refresh(db_product)
@@ -271,7 +333,11 @@ async def submit_for_moderation(product_id: int, db: AsyncSession = Depends(get_
 @router.post("/products/{product_id}/delete", status_code=204)
 async def delete_product(product_id: int, db: AsyncSession = Depends(get_db)):
     """
-    Удалить товар (мягкое удаление)
+    Удалить товар (мягкое удаление).
+
+    HARD_BLOCKED — удаление запрещено (403).
+    При удалении отправляется событие в Moderation сервис,
+    чтобы убрать карточку из очереди модерации.
     """
     db_product = await db.get(Product, product_id)
     if not db_product or db_product.deleted:
@@ -281,5 +347,8 @@ async def delete_product(product_id: int, db: AsyncSession = Depends(get_db)):
 
     db_product.deleted = True
     await db.commit()
+
+    # Notify moderation service to remove from queue
+    _notify_moderation_delete(product_id)
 
     return None

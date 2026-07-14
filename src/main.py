@@ -24,7 +24,6 @@ app.include_router(skus.router, prefix="/api/v1", tags=["SKUs"])
 app.include_router(invoices.router, prefix="/api/v1", tags=["Invoices"])
 app.include_router(categories.router, prefix="/api/v1", tags=["Categories"])
 app.include_router(moderation.router, prefix="/api/v1", tags=["Moderation"])
-app.include_router(moderation.approve_router, prefix="/api/v1", tags=["Moderation"])
 app.include_router(inventory.router, prefix="/api/v1/inventory", tags=["Inventory"])
 
 

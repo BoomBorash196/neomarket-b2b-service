@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models.base import get_db
@@ -27,9 +27,26 @@ from src.services.moderation import (
     ProductAlreadyModeratedError,
     ModerationEventError,
 )
+from src.settings import settings
 
 router = APIRouter()
-approve_router = APIRouter()
+
+
+def _check_service_token(request: Request) -> None:
+    """
+    Validate inter-service authorization header.
+    Expects: X-Service-Token: <service_token>
+    Returns 401 if missing or invalid.
+    """
+    token = request.headers.get("X-Service-Token")
+    if not token or token != settings.service_token:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": "UNAUTHORIZED_SERVICE",
+                "message": "Missing or invalid service token",
+            },
+        )
 
 
 def _get_moderation_service() -> ModerationService:
@@ -48,12 +65,13 @@ def _get_approve_service() -> ModeratorApproveService:
     status_code=200,
     responses={
         400: {"model": ErrorResponse, "description": "Invalid event payload"},
-        401: {"model": ErrorResponse, "description": "Unauthorized"},
-        409: {"model": ErrorResponse, "description": "Duplicate event"},
+        401: {"model": ErrorResponse, "description": "Unauthorized — missing service token"},
+        409: {"model": ErrorResponse, "description": "Duplicate event or wrong status"},
     },
 )
 async def receive_moderation_event(
     event: ModerationEventRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> ModerationEventResponse:
     """
@@ -65,7 +83,11 @@ async def receive_moderation_event(
     - BLOCKED → product transitions ON_MODERATION → BLOCKED/HARD_BLOCKED
 
     Idempotent by idempotency_key (TTL 24h).
+    Requires X-Service-Token header for inter-service auth.
     """
+    # Inter-service auth
+    _check_service_token(request)
+
     service = _get_moderation_service()
 
     try:
@@ -128,7 +150,7 @@ async def receive_moderation_event(
 
 # ──────────────────────── /products/{product_id}/approve ────────────────────────
 
-@approve_router.post(
+@router.post(
     "/products/{product_id}/approve",
     response_model=ProductApproveResponse,
     status_code=200,
