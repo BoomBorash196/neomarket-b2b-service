@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from src.routes import products, skus, invoices, categories, moderation
+from src.routes import products, skus, invoices, categories, moderation, inventory
 
 app = FastAPI(
     title="NeoMarket B2B Seller Cabinet",
@@ -25,6 +25,7 @@ app.include_router(invoices.router, prefix="/api/v1", tags=["Invoices"])
 app.include_router(categories.router, prefix="/api/v1", tags=["Categories"])
 app.include_router(moderation.router, prefix="/api/v1", tags=["Moderation"])
 app.include_router(moderation.approve_router, prefix="/api/v1", tags=["Moderation"])
+app.include_router(inventory.router, prefix="/api/v1/inventory", tags=["Inventory"])
 
 
 @app.get("/health")
