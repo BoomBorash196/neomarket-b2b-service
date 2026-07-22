@@ -3,6 +3,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
 from typing import List, Optional
 import json
+import uuid
+import httpx
 
 from src.models.base import get_db
 from src.models.product import Product, ProductStatus, ProductImage, ProductCharacteristic
@@ -61,15 +63,22 @@ def _product_to_snapshot(product: Product) -> dict:
     }
 
 
-def _notify_moderation_delete(product_id: int) -> None:
+async def _notify_moderation_delete(product_id: int, seller_id: int = 0) -> None:
     """Notify moderation service about product deletion."""
-    # In production: async httpx call
-    # async with httpx.AsyncClient() as client:
-    #     await client.post(
-    #         f"{settings.moderation_service_url}/api/v1/products/{product_id}/notify",
-    #         json={"event_type": "DELETED"}
-    #     )
-    pass
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await client.post(
+                f"{settings.moderation_service_url}/api/v1/b2b/events",
+                json={
+                    "idempotency_key": f"delete-{product_id}-{uuid.uuid4()}",
+                    "product_id": product_id,
+                    "seller_id": seller_id,
+                    "event_type": "PRODUCT_DELETED",
+                },
+                headers={"X-Service-Key": settings.service_token},
+            )
+    except httpx.HTTPError:
+        pass
 
 
 @router.post("/products", response_model=ProductResponse, status_code=201)
@@ -297,6 +306,25 @@ async def update_product(
     await db.commit()
     await db.refresh(db_product)
 
+    # Notify Moderation service about product edit
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await client.post(
+                f"{settings.moderation_service_url}/api/v1/b2b/events",
+                json={
+                    "idempotency_key": f"edit-{product_id}-{uuid.uuid4()}",
+                    "product_id": product_id,
+                    "seller_id": db_product.seller_id,
+                    "event_type": "PRODUCT_EDITED",
+                    "title": db_product.title,
+                    "description": db_product.description,
+                    "category_id": db_product.category_id,
+                },
+                headers={"X-Service-Key": settings.service_token},
+            )
+    except httpx.HTTPError:
+        pass
+
     return db_product
 
 
@@ -319,11 +347,24 @@ async def submit_for_moderation(product_id: int, db: AsyncSession = Depends(get_
 
     db_product.status = ProductStatus.ON_MODERATION
 
-    # TODO: Отправить событие в Moderation сервис
-    # async with httpx.AsyncClient() as client:
-    #     await client.post(
-    #         f"{settings.moderation_service_url}/api/v1/products/{product_id}/notify"
-    #     )
+    # Отправить событие PRODUCT_CREATED в Moderation сервис
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await client.post(
+                f"{settings.moderation_service_url}/api/v1/b2b/events",
+                json={
+                    "idempotency_key": f"create-{product_id}-{uuid.uuid4()}",
+                    "product_id": product_id,
+                    "seller_id": db_product.seller_id,
+                    "event_type": "PRODUCT_CREATED",
+                    "title": db_product.title,
+                    "description": db_product.description,
+                    "category_id": db_product.category_id,
+                },
+                headers={"X-Service-Key": settings.service_token},
+            )
+    except httpx.HTTPError:
+        pass
 
     await db.commit()
 
@@ -349,6 +390,6 @@ async def delete_product(product_id: int, db: AsyncSession = Depends(get_db)):
     await db.commit()
 
     # Notify moderation service to remove from queue
-    _notify_moderation_delete(product_id)
+    await _notify_moderation_delete(product_id, db_product.seller_id)
 
     return None

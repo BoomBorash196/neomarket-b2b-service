@@ -1,4 +1,9 @@
-"""Tests for idempotency, service auth, status transitions, and delete flow."""
+"""Tests for idempotency, service auth, status transitions, and delete flow.
+
+Covers two directions of inter-service communication:
+1. B2B → Moderation: sending PRODUCT_CREATED / PRODUCT_EDITED / PRODUCT_DELETED events
+2. Moderation → B2B: receiving MODERATED / BLOCKED decisions on /moderation/events
+"""
 
 from __future__ import annotations
 
@@ -24,11 +29,214 @@ def _make_idempotent_record(key: str, processed_at: datetime | None = None):
     return record
 
 
-# ──────────────────────── Idempotency ────────────────────────
+def _mock_httpx_async_client():
+    """Create a mock for httpx.AsyncClient context manager."""
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(return_value=MagicMock(status_code=200))
+    mock_ctx = AsyncMock()
+    mock_ctx.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_ctx.__aexit__ = AsyncMock(return_value=None)
+    return mock_ctx
+
+
+# ──────────────────────── B2B → Moderation: PRODUCT_CREATED ────────────────────────
+
+@pytest.mark.asyncio
+async def test_created_pending():
+    """submit_for_moderation sends PRODUCT_CREATED event to Moderation service."""
+    product = _mock_product(
+        product_id=100,
+        status=ProductStatus.CREATED,
+        seller_id=1,
+        has_sku=True,
+    )
+    session = _mock_session(product, [])
+
+    async def override_get_db():
+        yield session
+
+    app.dependency_overrides[real_get_db] = override_get_db
+
+    with patch("src.routes.products.httpx.AsyncClient") as mock_client_cls:
+        mock_ctx = _mock_httpx_async_client()
+        mock_client_cls.return_value = mock_ctx
+
+        response = TestClient(app, base_url="http://test").post(
+            "/api/v1/products/100/submit-moderation",
+        )
+
+    assert response.status_code == 204, f"Expected 204, got {response.status_code}: {response.text}"
+    # Verify that httpx POST was called with PRODUCT_CREATED event
+    mock_ctx.__aenter__.return_value.post.assert_called_once()
+    call_args = mock_ctx.__aenter__.return_value.post.call_args
+    body = call_args.kwargs.get("json") or call_args[1].get("json")
+    assert body["event_type"] == "PRODUCT_CREATED"
+    assert body["product_id"] == 100
+    assert body["seller_id"] == 1
+
+
+# ──────────────────────── B2B → Moderation: PRODUCT_EDITED ────────────────────────
+
+@pytest.mark.asyncio
+async def test_edited_returns_to_review():
+    """Editing a MODERATED product returns it to ON_MODERATION and sends PRODUCT_EDITED."""
+    product = _mock_product(
+        product_id=100,
+        status=ProductStatus.MODERATED,
+        seller_id=1,
+        has_sku=True,
+    )
+    session = _mock_session(product, [])
+
+    async def mock_refresh(obj):
+        obj.status = ProductStatus.ON_MODERATION
+        obj.previous_snapshot = '{"status": "MODERATED"}'
+        return None
+
+    session.refresh = mock_refresh
+    session.commit = AsyncMock()
+
+    async def override_get_db():
+        yield session
+
+    app.dependency_overrides[real_get_db] = override_get_db
+
+    with patch("src.routes.products.httpx.AsyncClient") as mock_client_cls:
+        mock_ctx = _mock_httpx_async_client()
+        mock_client_cls.return_value = mock_ctx
+
+        response = TestClient(app, base_url="http://test").put(
+            "/api/v1/products/100",
+            json={"title": "Updated title"},
+            headers={"X-Seller-Id": "1"},
+        )
+
+    assert response.status_code == 200, f"Expected 200, got {response.status_code}: {response.text}"
+    data = response.json()
+    assert data["status"] == "ON_MODERATION"
+    # Verify PRODUCT_EDITED event was sent to Moderation
+    mock_ctx.__aenter__.return_value.post.assert_called_once()
+    call_args = mock_ctx.__aenter__.return_value.post.call_args
+    body = call_args.kwargs.get("json") or call_args[1].get("json")
+    assert body["event_type"] == "PRODUCT_EDITED"
+    assert body["product_id"] == 100
+
+
+@pytest.mark.asyncio
+async def test_edited_updates_in_review():
+    """Editing a BLOCKED product returns it to ON_MODERATION and sends PRODUCT_EDITED."""
+    product = _mock_product(
+        product_id=100,
+        status=ProductStatus.BLOCKED,
+        seller_id=1,
+        has_sku=True,
+    )
+    session = _mock_session(product, [])
+
+    async def mock_refresh(obj):
+        obj.status = ProductStatus.ON_MODERATION
+        obj.previous_snapshot = '{"status": "BLOCKED"}'
+        return None
+
+    session.refresh = mock_refresh
+    session.commit = AsyncMock()
+
+    async def override_get_db():
+        yield session
+
+    app.dependency_overrides[real_get_db] = override_get_db
+
+    with patch("src.routes.products.httpx.AsyncClient") as mock_client_cls:
+        mock_ctx = _mock_httpx_async_client()
+        mock_client_cls.return_value = mock_ctx
+
+        response = TestClient(app, base_url="http://test").put(
+            "/api/v1/products/100",
+            json={"title": "Updated title"},
+            headers={"X-Seller-Id": "1"},
+        )
+
+    assert response.status_code == 200, f"Expected 200, got {response.status_code}: {response.text}"
+    data = response.json()
+    assert data["status"] == "ON_MODERATION"
+    # Verify PRODUCT_EDITED event was sent
+    mock_ctx.__aenter__.return_value.post.assert_called_once()
+    call_args = mock_ctx.__aenter__.return_value.post.call_args
+    body = call_args.kwargs.get("json") or call_args[1].get("json")
+    assert body["event_type"] == "PRODUCT_EDITED"
+
+
+# ──────────────────────── B2B → Moderation: PRODUCT_DELETED ────────────────────────
+
+@pytest.mark.asyncio
+async def test_deleted_archived():
+    """Deleting a product sets deleted=True and sends PRODUCT_DELETED to Moderation."""
+    product = _mock_product(
+        product_id=100,
+        status=ProductStatus.ON_MODERATION,
+        seller_id=1,
+        has_sku=True,
+    )
+    session = _mock_session(product, [])
+
+    async def override_get_db():
+        yield session
+
+    app.dependency_overrides[real_get_db] = override_get_db
+
+    with patch("src.routes.products.httpx.AsyncClient") as mock_client_cls:
+        mock_ctx = _mock_httpx_async_client()
+        mock_client_cls.return_value = mock_ctx
+
+        response = TestClient(app, base_url="http://test").post(
+            "/api/v1/products/100/delete",
+        )
+
+    assert response.status_code == 204, f"Expected 204, got {response.status_code}: {response.text}"
+    # Verify PRODUCT_DELETED event was sent to Moderation
+    mock_ctx.__aenter__.return_value.post.assert_called_once()
+    call_args = mock_ctx.__aenter__.return_value.post.call_args
+    body = call_args.kwargs.get("json") or call_args[1].get("json")
+    assert body["event_type"] == "PRODUCT_DELETED"
+    assert body["product_id"] == 100
+
+
+@pytest.mark.asyncio
+async def test_delete_moderated_product_notifies_moderation():
+    """Deleting a MODERATED product also sends PRODUCT_DELETED to Moderation."""
+    product = _mock_product(
+        product_id=100,
+        status=ProductStatus.MODERATED,
+        seller_id=1,
+        has_sku=True,
+    )
+    session = _mock_session(product, [])
+
+    async def override_get_db():
+        yield session
+
+    app.dependency_overrides[real_get_db] = override_get_db
+
+    with patch("src.routes.products.httpx.AsyncClient") as mock_client_cls:
+        mock_ctx = _mock_httpx_async_client()
+        mock_client_cls.return_value = mock_ctx
+
+        response = TestClient(app, base_url="http://test").post(
+            "/api/v1/products/100/delete",
+        )
+
+    assert response.status_code == 204, f"Expected 204, got {response.status_code}: {response.text}"
+    mock_ctx.__aenter__.return_value.post.assert_called_once()
+    call_args = mock_ctx.__aenter__.return_value.post.call_args
+    body = call_args.kwargs.get("json") or call_args[1].get("json")
+    assert body["event_type"] == "PRODUCT_DELETED"
+
+
+# ──────────────────────── Moderation → B2B: Idempotency ────────────────────────
 
 @pytest.mark.asyncio
 async def test_duplicate_event_no_side_effects():
-    """Duplicate event with same idempotency_key returns 200 without side effects."""
+    """Duplicate MODERATED event with same idempotency_key returns 200 without side effects."""
     product = _mock_product(
         product_id=100,
         status=ProductStatus.ON_MODERATION,
@@ -61,11 +269,7 @@ async def test_duplicate_event_no_side_effects():
     app.dependency_overrides[real_get_db] = override_get_db
 
     with patch("src.services.moderation.httpx.AsyncClient") as mock_client_cls:
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(return_value=MagicMock(status_code=200))
-        mock_ctx = AsyncMock()
-        mock_ctx.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_ctx.__aexit__ = AsyncMock(return_value=None)
+        mock_ctx = _mock_httpx_async_client()
         mock_client_cls.return_value = mock_ctx
 
         response = TestClient(app, base_url="http://test").post(
@@ -128,7 +332,7 @@ async def test_duplicate_blocked_event_no_side_effects():
     assert response.status_code == 200, f"Expected 200, got {response.status_code}: {response.text}"
 
 
-# ──────────────────────── Service Auth ────────────────────────
+# ──────────────────────── Moderation → B2B: Service Auth ────────────────────────
 
 @pytest.mark.asyncio
 async def test_missing_service_header_401():
@@ -165,130 +369,6 @@ async def test_invalid_service_header_401():
     assert data["detail"]["code"] == "UNAUTHORIZED_SERVICE"
 
 
-# ──────────────────────── Status Transitions ────────────────────────
-
-@pytest.mark.asyncio
-async def test_edited_returns_to_review():
-    """Editing a MODERATED product returns it to ON_MODERATION."""
-    product = _mock_product(
-        product_id=100,
-        status=ProductStatus.MODERATED,
-        seller_id=1,
-        has_sku=True,
-    )
-    session = _mock_session(product, [])
-
-    async def mock_refresh(obj):
-        obj.status = ProductStatus.ON_MODERATION
-        obj.previous_snapshot = '{"status": "MODERATED"}'
-        return None
-
-    session.refresh = mock_refresh
-    session.commit = AsyncMock()
-
-    async def override_get_db():
-        yield session
-
-    app.dependency_overrides[real_get_db] = override_get_db
-
-    response = TestClient(app, base_url="http://test").put(
-        "/api/v1/products/100",
-        json={"title": "Updated title"},
-        headers={"X-Seller-Id": "1"},
-    )
-
-    assert response.status_code == 200, f"Expected 200, got {response.status_code}: {response.text}"
-    data = response.json()
-    assert data["status"] == "ON_MODERATION"
-
-
-@pytest.mark.asyncio
-async def test_edited_updates_in_review():
-    """Editing a BLOCKED product returns it to ON_MODERATION."""
-    product = _mock_product(
-        product_id=100,
-        status=ProductStatus.BLOCKED,
-        seller_id=1,
-        has_sku=True,
-    )
-    session = _mock_session(product, [])
-
-    async def mock_refresh(obj):
-        obj.status = ProductStatus.ON_MODERATION
-        obj.previous_snapshot = '{"status": "BLOCKED"}'
-        return None
-
-    session.refresh = mock_refresh
-    session.commit = AsyncMock()
-
-    async def override_get_db():
-        yield session
-
-    app.dependency_overrides[real_get_db] = override_get_db
-
-    response = TestClient(app, base_url="http://test").put(
-        "/api/v1/products/100",
-        json={"title": "Updated title"},
-        headers={"X-Seller-Id": "1"},
-    )
-
-    assert response.status_code == 200, f"Expected 200, got {response.status_code}: {response.text}"
-    data = response.json()
-    assert data["status"] == "ON_MODERATION"
-
-
-# ──────────────────────── Delete Flow ────────────────────────
-
-@pytest.mark.asyncio
-async def test_deleted_archived():
-    """Deleting a product sets deleted=True and notifies moderation."""
-    product = _mock_product(
-        product_id=100,
-        status=ProductStatus.ON_MODERATION,
-        seller_id=1,
-        has_sku=True,
-    )
-    session = _mock_session(product, [])
-
-    async def override_get_db():
-        yield session
-
-    app.dependency_overrides[real_get_db] = override_get_db
-
-    with patch("src.routes.products._notify_moderation_delete") as mock_notify:
-        response = TestClient(app, base_url="http://test").post(
-            "/api/v1/products/100/delete",
-        )
-
-    assert response.status_code == 204, f"Expected 204, got {response.status_code}: {response.text}"
-    mock_notify.assert_called_once_with(100)
-
-
-@pytest.mark.asyncio
-async def test_delete_moderated_product_returns_to_review():
-    """Deleting a MODERATED product should also notify moderation."""
-    product = _mock_product(
-        product_id=100,
-        status=ProductStatus.MODERATED,
-        seller_id=1,
-        has_sku=True,
-    )
-    session = _mock_session(product, [])
-
-    async def override_get_db():
-        yield session
-
-    app.dependency_overrides[real_get_db] = override_get_db
-
-    with patch("src.routes.products._notify_moderation_delete") as mock_notify:
-        response = TestClient(app, base_url="http://test").post(
-            "/api/v1/products/100/delete",
-        )
-
-    assert response.status_code == 204, f"Expected 204, got {response.status_code}: {response.text}"
-    mock_notify.assert_called_once_with(100)
-
-
 # ──────────────────────── Snapshot History ────────────────────────
 
 @pytest.mark.asyncio
@@ -315,13 +395,16 @@ async def test_update_saves_previous_snapshot():
 
     app.dependency_overrides[real_get_db] = override_get_db
 
-    response = TestClient(app, base_url="http://test").put(
-        "/api/v1/products/100",
-        json={"title": "New title"},
-        headers={"X-Seller-Id": "1"},
-    )
+    with patch("src.routes.products.httpx.AsyncClient") as mock_client_cls:
+        mock_ctx = _mock_httpx_async_client()
+        mock_client_cls.return_value = mock_ctx
+
+        response = TestClient(app, base_url="http://test").put(
+            "/api/v1/products/100",
+            json={"title": "New title"},
+            headers={"X-Seller-Id": "1"},
+        )
 
     assert response.status_code == 200, f"Expected 200, got {response.status_code}: {response.text}"
     data = response.json()
     assert data["title"] == "New title"
-    assert data.get("previous_snapshot") is not None

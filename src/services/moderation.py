@@ -127,6 +127,7 @@ class ModerationService:
         hard_block: bool = False,
         blocking_reason: Optional[str] = None,
         moderator_comment: Optional[str] = None,
+        field_reports: Optional[list] = None,
     ) -> Product:
         """
         Process a BLOCKED event from Moderation Service.
